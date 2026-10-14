@@ -1,0 +1,324 @@
+Step 1: Update Ubuntu and install packages
+sudo apt update
+sudo apt install -y openjdk-11-jdk openssh-server openssh-client rsync wget
+
+
+Step 2: Verify Java
+java -version
+javac -version
+
+
+Step 3: Configure SSH
+sudo systemctl enable --now ssh
+
+
+mkdir -p ~/.ssh
+
+
+if [ ! -f ~/.ssh/id_ed25519 ]; then ssh-keygen -t ed25519 -N "" -f ~/.ssh/id_ed25519; fi
+
+
+touch ~/.ssh/authorized_keys
+grep -qxF "$(cat ~/.ssh/id_ed25519.pub)" ~/.ssh/authorized_keys || cat ~/.ssh/id_ed25519.pub >> ~/.ssh/authorized_keys
+chmod 700 ~/.ssh
+chmod 600 ~/.ssh/authorized_keys
+
+
+ssh -o StrictHostKeyChecking=accept-new localhost
+
+
+exit
+
+
+Step 4: Download Hadoop 3.3.6
+cd ~
+wget https://archive.apache.org/dist/hadoop/common/hadoop-3.3.6/hadoop-3.3.6.tar.gz
+tar -xzf hadoop-3.3.6.tar.gz
+
+
+If ~/hadoop does not already exist:
+mv ~/hadoop-3.3.6 ~/hadoop
+
+
+Step 5: Configure environment variables
+sed -i '/^export JAVA_HOME=/d;/^export HADOOP_HOME=/d;/^export HADOOP_INSTALL=/d;/^export HADOOP_MAPRED_HOME=/d;/^export HADOOP_COMMON_HOME=/d;/^export HADOOP_HDFS_HOME=/d;/^export HADOOP_YARN_HOME=/d;/^export PATH=.*hadoop\/bin/d;/^export PATH=.*hadoop\/sbin/d' ~/.bashrc
+
+
+cat >> ~/.bashrc <<'EOF'
+export JAVA_HOME=/usr/lib/jvm/java-11-openjdk-amd64
+export HADOOP_HOME=/home/vboxuser/hadoop
+export HADOOP_INSTALL=$HADOOP_HOME
+export HADOOP_MAPRED_HOME=$HADOOP_HOME
+export HADOOP_COMMON_HOME=$HADOOP_HOME
+export HADOOP_HDFS_HOME=$HADOOP_HOME
+export HADOOP_YARN_HOME=$HADOOP_HOME
+export PATH=$PATH:$HADOOP_HOME/bin:$HADOOP_HOME/sbin
+EOF
+
+
+source ~/.bashrc
+
+
+sed -i '/^export JAVA_HOME=/d' "$HADOOP_HOME/etc/hadoop/hadoop-env.sh"
+echo 'export JAVA_HOME=/usr/lib/jvm/java-11-openjdk-amd64' >> "$HADOOP_HOME/etc/hadoop/hadoop-env.sh"
+
+
+Step 6: Configure core-site.xml
+cat > "$HADOOP_HOME/etc/hadoop/core-site.xml" <<'EOF'
+<?xml version="1.0"?>
+<configuration>
+    <property>
+        <name>fs.defaultFS</name>
+        <value>hdfs://localhost:9000</value>
+    </property>
+</configuration>
+EOF
+
+
+Step 7: Configure hdfs-site.xml
+cat > "$HADOOP_HOME/etc/hadoop/hdfs-site.xml" <<'EOF'
+<?xml version="1.0"?>
+<configuration>
+    <property>
+        <name>dfs.replication</name>
+        <value>1</value>
+    </property>
+</configuration>
+EOF
+
+
+Step 8: Configure mapred-site.xml
+cat > "$HADOOP_HOME/etc/hadoop/mapred-site.xml" <<'EOF'
+<?xml version="1.0"?>
+<configuration>
+    <property>
+        <name>mapreduce.framework.name</name>
+        <value>yarn</value>
+    </property>
+    <property>
+        <name>mapreduce.application.classpath</name>
+        <value>/home/vboxuser/hadoop/share/hadoop/mapreduce/*:/home/vboxuser/hadoop/share/hadoop/mapreduce/lib/*</value>
+    </property>
+    <property>
+        <name>yarn.app.mapreduce.am.env</name>
+        <value>HADOOP_MAPRED_HOME=/home/vboxuser/hadoop</value>
+    </property>
+    <property>
+        <name>mapreduce.map.env</name>
+        <value>HADOOP_MAPRED_HOME=/home/vboxuser/hadoop</value>
+    </property>
+    <property>
+        <name>mapreduce.reduce.env</name>
+        <value>HADOOP_MAPRED_HOME=/home/vboxuser/hadoop</value>
+    </property>
+</configuration>
+EOF
+
+
+Step 9: Configure yarn-site.xml
+cat > "$HADOOP_HOME/etc/hadoop/yarn-site.xml" <<'EOF'
+<?xml version="1.0"?>
+<configuration>
+    <property>
+        <name>yarn.nodemanager.aux-services</name>
+        <value>mapreduce_shuffle</value>
+    </property>
+    <property>
+        <name>yarn.nodemanager.env-whitelist</name>
+        <value>JAVA_HOME,HADOOP_COMMON_HOME,HADOOP_HDFS_HOME,HADOOP_CONF_DIR,CLASSPATH_PREPEND_DISTCACHE,HADOOP_YARN_HOME,HADOOP_HOME,HADOOP_MAPRED_HOME,PATH,LANG,TZ</value>
+    </property>
+</configuration>
+EOF
+
+
+Step 10: Validate XML files
+python3 - <<'PY'
+import os
+import xml.etree.ElementTree as ET
+
+base = os.path.expanduser("~/hadoop/etc/hadoop")
+for name in ["core-site.xml", "hdfs-site.xml", "mapred-site.xml", "yarn-site.xml"]:
+    path = os.path.join(base, name)
+    ET.parse(path)
+    print(name, "OK")
+PY
+
+
+Step 11: Format HDFS (fresh installation only)
+hdfs namenode -format
+
+
+Step 12: Start HDFS
+start-dfs.sh
+
+
+jps
+
+
+Step 13: Create HDFS directories
+hdfs dfs -mkdir -p /user/vboxuser
+hdfs dfs -mkdir -p /input
+
+
+Step 14: Create and upload input file
+mkdir -p ~/hadoop-lab
+cd ~/hadoop-lab
+
+
+cat > input.txt <<'EOF'
+hello hadoop
+hello java
+hadoop java
+hello world
+EOF
+
+
+hdfs dfs -put -f input.txt /input/
+hdfs dfs -cat /input/input.txt
+
+
+Step 15: Start YARN
+start-yarn.sh
+
+
+jps
+
+
+Step 16: Create WordCount.java
+cd ~/hadoop-lab
+nano WordCount.java
+
+
+Paste:
+import java.io.IOException;
+import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.fs.Path;
+import org.apache.hadoop.io.*;
+import org.apache.hadoop.mapreduce.*;
+import org.apache.hadoop.mapreduce.lib.input.FileInputFormat;
+import org.apache.hadoop.mapreduce.lib.output.FileOutputFormat;
+
+public class WordCount {
+    public static class MyMapper extends Mapper<LongWritable, Text, Text, IntWritable> {
+        public void map(LongWritable key, Text value, Context context)
+                throws IOException, InterruptedException {
+            String[] words = value.toString().split("\\s+");
+            for (String word : words) {
+                if (!word.isEmpty()) {
+                    context.write(new Text(word), new IntWritable(1));
+                }
+            }
+        }
+    }
+
+    public static class MyReducer extends Reducer<Text, IntWritable, Text, IntWritable> {
+        public void reduce(Text key, Iterable<IntWritable> values, Context context)
+                throws IOException, InterruptedException {
+            int sum = 0;
+            for (IntWritable value : values) {
+                sum += value.get();
+            }
+            context.write(key, new IntWritable(sum));
+        }
+    }
+
+    public static void main(String[] args) throws Exception {
+        if (args.length != 2) {
+            System.err.println("Usage: WordCount <input> <output>");
+            System.exit(1);
+        }
+
+        Configuration conf = new Configuration();
+        Job job = Job.getInstance(conf, "Word Count");
+        job.setJarByClass(WordCount.class);
+        job.setMapperClass(MyMapper.class);
+        job.setCombinerClass(MyReducer.class);
+        job.setReducerClass(MyReducer.class);
+        job.setOutputKeyClass(Text.class);
+        job.setOutputValueClass(IntWritable.class);
+        FileInputFormat.addInputPath(job, new Path(args[0]));
+        FileOutputFormat.setOutputPath(job, new Path(args[1]));
+        System.exit(job.waitForCompletion(true) ? 0 : 1);
+    }
+}
+
+
+Save: Ctrl+O, Enter, Ctrl+X.
+Step 17: Compile and create JAR
+cd ~/hadoop-lab
+rm -rf classes
+mkdir classes
+javac --release 11 -classpath "$(hadoop classpath)" -d classes WordCount.java
+
+
+jar -cvf wordcount.jar -C classes .
+
+
+jar -tf wordcount.jar
+
+
+Step 18: Run WordCount
+hdfs dfs -rm -r -f /output
+
+
+hadoop jar ~/hadoop-lab/wordcount.jar WordCount /input /output
+
+
+hdfs dfs -cat /output/part-r-00000
+
+
+Expected output:
+hadoop  2
+hello   3
+java    2
+world   1
+
+
+Step 19: Test repeated words
+cd ~/hadoop-lab
+printf 'apple apple apple\nbanana apple\n' > test1.txt
+hdfs dfs -mkdir -p /test1
+hdfs dfs -put -f test1.txt /test1/
+hdfs dfs -rm -r -f /out1
+hadoop jar wordcount.jar WordCount /test1 /out1
+hdfs dfs -cat /out1/part-r-00000
+
+
+Expected:
+apple   4
+banana  1
+
+
+Step 20: Test empty input
+touch empty.txt
+hdfs dfs -mkdir -p /empty
+hdfs dfs -put -f empty.txt /empty/
+hdfs dfs -rm -r -f /out-empty
+hadoop jar wordcount.jar WordCount /empty /out-empty
+
+
+Step 21: Troubleshooting commands
+Check services:
+jps
+
+
+Check logs:
+ls -lt "$HADOOP_HOME/logs" | head
+
+
+Check HDFS safe mode:
+hdfs dfsadmin -safemode get
+hdfs dfsadmin -report
+
+
+Check MapReduce JARs:
+find "$HADOOP_HOME/share/hadoop/mapreduce" -name '*.jar' | head
+
+
+Restart YARN after configuration changes:
+stop-yarn.sh
+start-yarn.sh
+
+
+Remove output before rerunning:
+hdfs dfs -rm -r -f /output
